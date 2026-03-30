@@ -1114,27 +1114,123 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { if (currentSlide > 0) goSlide(currentSlide - 1); }
 });
 
+// ── FIREBASE SETUP ────────────────────────────────────────────────────────────
+
+const FB_URL = 'https://animation-info-default-rtdb.firebaseio.com';
+
+async function fbGet(path) {
+  const r = await fetch(FB_URL + path + '.json');
+  return r.json();
+}
+async function fbSet(path, val) {
+  await fetch(FB_URL + path + '.json', { method: 'PUT', body: JSON.stringify(val) });
+}
+async function fbTransaction(path, updateFn) {
+  const current = await fbGet(path) || 0;
+  await fbSet(path, updateFn(current));
+}
+
+// Écoute en temps réel via SSE (Server-Sent Events Firebase)
+function fbListen(path, cb) {
+  const es = new EventSource(FB_URL + path + '.json?accept=text/event-stream');
+  es.addEventListener('put', e => { try { cb(JSON.parse(e.data).data); } catch(err){} });
+  es.addEventListener('patch', e => { try { cb(JSON.parse(e.data).data); } catch(err){} });
+  return es;
+}
+
 // ── SONDAGE ────────────────────────────────────────────────────────────
 
-let pollVotes = [0, 0, 0, 0];
-let pollTotal = 0;
+let hasVotedInitial = false;
+let hasVotedFinal   = false;
 
-function vote(idx) {
-  pollVotes[idx]++;
-  pollTotal++;
-  document.getElementById('poll-' + idx).classList.add('selected', 'pop');
-  setTimeout(() => document.getElementById('poll-' + idx).classList.remove('pop'), 300);
+function renderPoll(data, prefix) {
+  if (!data) return;
+  const votes = [data.v0||0, data.v1||0, data.v2||0, data.v3||0];
+  const total = votes.reduce((a,b) => a+b, 0);
   for (let i = 0; i < 4; i++) {
-    const pct = pollTotal > 0 ? Math.round((pollVotes[i] / pollTotal) * 100) : 0;
-    document.getElementById('bar-' + i).style.width = pct + '%';
-    document.getElementById('cnt-' + i).textContent = pollVotes[i] + ' (' + pct + '%)';
+    const pct = total > 0 ? Math.round((votes[i] / total) * 100) : 0;
+    const bar = document.getElementById(prefix + 'bar-' + i);
+    const cnt = document.getElementById(prefix + 'cnt-' + i);
+    if (bar) bar.style.width = pct + '%';
+    if (cnt) cnt.textContent = votes[i] + ' (' + pct + '%)';
   }
 }
 
-function finalVote(el) {
+// Écoute temps réel sondage initial
+fbListen('/poll', data => renderPoll(data, ''));
+
+// Écoute temps réel sondage final
+fbListen('/poll_final', data => renderPoll(data, 'f'));
+
+async function vote(idx) {
+  if (hasVotedInitial) return;
+  hasVotedInitial = true;
+  document.getElementById('poll-' + idx).classList.add('selected', 'pop');
+  setTimeout(() => document.getElementById('poll-' + idx).classList.remove('pop'), 300);
+  await fbTransaction('/poll/v' + idx, n => (n||0) + 1);
+}
+
+async function finalVote(el) {
+  if (hasVotedFinal) return;
+  hasVotedFinal = true;
   document.querySelectorAll('#slide-7 .poll-option').forEach(o => o.classList.remove('selected'));
   el.classList.add('selected');
+  const labels = ['v0','v1','v2','v3'];
+  const opts = [...document.querySelectorAll('#slide-7 .poll-option')];
+  const idx = opts.indexOf(el);
+  if (idx >= 0) await fbTransaction('/poll_final/v' + idx, n => (n||0) + 1);
 }
+
+// Ajoute les barres au sondage final (slide 7) dynamiquement
+window.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('#slide-7 .poll-option').forEach((el, i) => {
+    el.style.display = 'flex';
+    el.style.alignItems = 'center';
+    el.style.gap = '12px';
+    const wrap = document.createElement('div');
+    wrap.className = 'poll-bar-wrap';
+    const bar = document.createElement('div');
+    bar.className = 'poll-bar';
+    bar.id = 'fbar-' + i;
+    wrap.appendChild(bar);
+    const cnt = document.createElement('span');
+    cnt.className = 'poll-count';
+    cnt.id = 'fcnt-' + i;
+    cnt.textContent = '—';
+    el.appendChild(wrap);
+    el.appendChild(cnt);
+  });
+  fbListen('/poll_final', data => {
+    if (!data) return;
+    const votes = [data.v0||0, data.v1||0, data.v2||0, data.v3||0];
+    const total = votes.reduce((a,b)=>a+b, 0);
+    for (let i = 0; i < 4; i++) {
+      const pct = total > 0 ? Math.round((votes[i]/total)*100) : 0;
+      const bar = document.getElementById('fbar-' + i);
+      const cnt = document.getElementById('fcnt-' + i);
+      if (bar) bar.style.width = pct + '%';
+      if (cnt) cnt.textContent = votes[i] + ' (' + pct + '%)';
+    }
+  });
+
+  // Bouton reset (visible seulement si ?reset dans l'URL)
+  if (location.search.includes('reset')) {
+    const btn = document.createElement('button');
+    btn.textContent = '🗑 Réinitialiser les votes';
+    btn.style.cssText = 'position:fixed;bottom:16px;right:16px;z-index:999;background:#ff6b6b;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer;font-family:var(--font)';
+    btn.onclick = async () => {
+      if (confirm('Remettre tous les compteurs à zéro ?')) {
+        await fbSet('/poll', {v0:0,v1:0,v2:0,v3:0});
+        await fbSet('/poll_final', {v0:0,v1:0,v2:0,v3:0});
+        hasVotedInitial = false;
+        hasVotedFinal = false;
+        document.querySelectorAll('.poll-option').forEach(o => o.classList.remove('selected'));
+        alert('Votes remis à zéro ✅');
+      }
+    };
+    document.body.appendChild(btn);
+  }
+});
 
 // ── MÉTIERS ────────────────────────────────────────────────────────────
 
